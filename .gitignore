@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+Source.csv
+school_schedules/
+.DS_Store

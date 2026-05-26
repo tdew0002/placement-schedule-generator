@@ -1,23 +1,21 @@
 """
 app.py  —  Placement Schedule Generator (Streamlit web app)
-
-HOW TO RUN LOCALLY:
-  streamlit run app.py
-
-HOW TO DEPLOY (free):
-  Push to GitHub, then connect at https://streamlit.io/cloud
 """
 
 import re
 import streamlit as st
 from core import (
-    load_csv,
-    extract_year,
+    load_inplace,
+    load_form,
+    get_available_years,
+    filter_inplace,
     detect_placement_dates,
+    extract_year_from_form,
     build_schedule_labels,
-    expand_long,
-    build_matrix,
+    build_master,
+    build_matrix_from_master,
     build_workbook,
+    build_no_placement_workbook,
     workbook_to_bytes,
     build_zip,
 )
@@ -29,7 +27,6 @@ st.set_page_config(
     layout="centered",
 )
 
-# ── Monash brand colours ─────────────────────────────────────
 MONASH_BLUE       = "#006DAE"
 MONASH_BLUE_DARK  = "#005490"
 MONASH_BLUE_LIGHT = "#E6F2F9"
@@ -39,7 +36,6 @@ MONASH_GREY       = "#5A5A5A"
 MONASH_LIGHT_GREY = "#E6E6E6"
 MONASH_BG         = "#F6F6F6"
 
-# ── Custom CSS ───────────────────────────────────────────────
 st.markdown(f"""
 <style>
 html, body, [class*="css"] {{
@@ -51,8 +47,6 @@ html, body, [class*="css"] {{
     padding-bottom: 3rem;
     max-width: 800px;
 }}
-
-/* ── Monash header bar ── */
 .monash-header {{
     background: {MONASH_BLUE};
     padding: 18px 28px;
@@ -77,16 +71,12 @@ html, body, [class*="css"] {{
     font-size: 1.3rem;
     font-weight: 700;
     margin: 0 0 2px 0;
-    letter-spacing: -0.3px;
 }}
 .monash-header-text p {{
     color: rgba(255,255,255,0.78);
     font-size: 0.82rem;
     margin: 0;
 }}
-
-/* ── Step section card ── */
-/* We target Streamlit's container element directly */
 div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {{
     background: white !important;
     border: 1px solid {MONASH_LIGHT_GREY} !important;
@@ -95,8 +85,6 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
     padding: 4px 8px 24px !important;
 }}
-
-/* ── Step header inside card ── */
 .step-header {{
     display: flex;
     align-items: center;
@@ -122,8 +110,6 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     color: {MONASH_DARK};
     margin: 0;
 }}
-
-/* ── Metric cards ── */
 .metrics-row {{
     display: flex;
     gap: 12px;
@@ -156,8 +142,6 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     color: #999;
     margin-top: 3px;
 }}
-
-/* ── Period box ── */
 .period-box {{
     background: {MONASH_BLUE_LIGHT};
     border: 1px solid #B3D4EA;
@@ -170,8 +154,17 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     margin-bottom: 8px;
 }}
 .period-box span {{ font-weight: 700; }}
-
-/* ── Status pills ── */
+.info-box {{
+    background: #FFF8E1;
+    border: 1px solid #FFE082;
+    border-left: 4px solid #F9A825;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 0.83rem;
+    color: #5D4037;
+    margin-top: 8px;
+    margin-bottom: 8px;
+}}
 .pill-success {{
     display: inline-flex;
     align-items: center;
@@ -193,8 +186,6 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     background: {MONASH_GREEN};
     flex-shrink: 0;
 }}
-
-/* ── Progress label ── */
 .progress-label {{
     font-size: 0.8rem;
     color: {MONASH_GREY};
@@ -206,21 +197,17 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     margin-top: 6px;
     margin-bottom: 8px;
 }}
-
-/* ── Success box ── */
 .success-box {{
     background: #E8F5EE;
     border: 1px solid #A8D5BB;
     border-left: 4px solid {MONASH_GREEN};
     border-radius: 6px;
     padding: 12px 16px;
-    margin: 8px 0 8px;
+    margin: 8px 0;
     font-size: 0.9rem;
     font-weight: 600;
     color: #1B5E35;
 }}
-
-/* ── Buttons ── */
 div[data-testid="stButton"] > button[kind="primary"] {{
     background: {MONASH_BLUE} !important;
     border: none !important;
@@ -239,18 +226,11 @@ div[data-testid="stDownloadButton"] > button {{
     font-size: 0.9rem !important;
     font-weight: 600 !important;
 }}
-div[data-testid="stDownloadButton"] > button:hover {{
-    background: #006B1D !important;
-}}
-
-/* ── Upload widget ── */
 [data-testid="stFileUploader"] {{
     border: 2px dashed {MONASH_LIGHT_GREY} !important;
     border-radius: 8px !important;
     background: {MONASH_BG} !important;
 }}
-
-/* ── Progress bar ── */
 [data-testid="stProgress"] > div > div {{
     background: {MONASH_BLUE} !important;
     border-radius: 3px !important;
@@ -260,11 +240,7 @@ div[data-testid="stDownloadButton"] > button:hover {{
     border-radius: 3px !important;
     height: 8px !important;
 }}
-
-/* ── Radio ── */
 [data-testid="stRadio"] label {{ font-size: 0.9rem !important; }}
-
-/* ── Footer ── */
 .monash-footer {{
     text-align: center;
     color: #aaa;
@@ -276,7 +252,7 @@ div[data-testid="stDownloadButton"] > button:hover {{
 </style>
 """, unsafe_allow_html=True)
 
-# ── Monash header ────────────────────────────────────────────
+# ── Header ───────────────────────────────────────────────────
 st.markdown("""
 <div class="monash-header">
     <div class="monash-logo-text">M</div>
@@ -285,59 +261,429 @@ st.markdown("""
         <p>Faculty of Education — Student Placement Office</p>
     </div>
 </div>
+<br>
 """, unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
+tab_main, tab_help, tab_inplace, tab_form = st.tabs(["Generate Schedules", "Help & Guide", "How to Download InPlace", "How to Download Form"])
+
+with tab_help:
+    st.markdown(f"""
+    <div style="padding:0.5rem 0">
+    <h3 style="color:{MONASH_BLUE};font-size:1.1rem;font-weight:700;margin-bottom:4px;">Quick Reference</h3>
+    <p style="color:{MONASH_GREY};font-size:0.85rem;margin-bottom:1.2rem;">
+        For the full step-by-step guide with screenshots, download the Word document below.
+    </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge">What you need</span>
+          <p class="step-title">Two files before you start</p>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+          <tr style="background:{MONASH_BLUE};color:white;">
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">File</th>
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">Where it comes from</th>
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">Format</th>
+          </tr>
+          <tr style="background:#F6F6F6;">
+            <td style="padding:8px 12px;font-weight:600;color:{MONASH_BLUE};">InPlace export</td>
+            <td style="padding:8px 12px;">Downloaded from the InPlace system</td>
+            <td style="padding:8px 12px;">.xlsx or .csv</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:{MONASH_BLUE};">Google Form responses</td>
+            <td style="padding:8px 12px;">Downloaded from Google Sheets (linked to the Form)</td>
+            <td style="padding:8px 12px;">.xlsx or .csv</td>
+          </tr>
+        </table>
+        <div style="margin-top:12px;margin-bottom:4px;background:#FFF8E1;border-left:4px solid #F9A825;border-radius:4px;padding:8px 12px;font-size:0.82rem;color:#5D4037;">
+          <strong>Important:</strong> Do NOT open and re-save the CSV in Excel before uploading — this can corrupt the date format.
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge">Steps</span>
+          <p class="step-title">How to generate the schedules</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        steps_html = ""
+        steps = [
+            ("1", "Upload both files", "In the Generate Schedules tab, upload the InPlace file on the left and the Google Form CSV on the right."),
+            ("2", "Select the year", "A year dropdown appears automatically based on the InPlace data. Choose the correct placement year."),
+            ("3", "Check the summary", "Confirm the detected placement period, student count, and school count look correct."),
+            ("4", "Choose schools", "Select All schools to export everything, or use Selected schools only to test with one school first."),
+            ("5", "Generate", "Click the Generate button and wait for the progress bar to complete. Do not close the browser."),
+            ("6", "Download", "Click the Download button to save your files. Multiple schools are bundled into a ZIP file."),
+        ]
+        for num, title, detail in steps:
+            steps_html += f"""
+            <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:12px;">
+              <div style="background:{MONASH_BLUE};color:white;font-size:0.75rem;font-weight:700;
+                          width:24px;height:24px;border-radius:50%;display:flex;align-items:center;
+                          justify-content:center;flex-shrink:0;margin-top:2px;">{num}</div>
+              <div>
+                <div style="font-size:0.88rem;font-weight:600;color:{MONASH_DARK};margin-bottom:2px;">{title}</div>
+                <div style="font-size:0.82rem;color:{MONASH_GREY};">{detail}</div>
+              </div>
+            </div>"""
+        st.markdown(steps_html, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge">Common errors</span>
+          <p class="step-title">Troubleshooting</p>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+          <tr style="background:{MONASH_BLUE};color:white;">
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">Error</th>
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">Fix</th>
+          </tr>
+          <tr style="background:#F6F6F6;">
+            <td style="padding:8px 12px;font-weight:600;">Year mismatch detected</td>
+            <td style="padding:8px 12px;">Download both files for the same placement year and re-upload.</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;">InPlace file is missing columns</td>
+            <td style="padding:8px 12px;">Re-download from InPlace without editing the file first.</td>
+          </tr>
+          <tr style="background:#F6F6F6;">
+            <td style="padding:8px 12px;font-weight:600;">No students found for selected year</td>
+            <td style="padding:8px 12px;">Check you have the correct year's InPlace export uploaded.</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;">No valid placement dates in Form</td>
+            <td style="padding:8px 12px;">Make sure the Form CSV has not been opened and re-saved in Excel.</td>
+          </tr>
+          <tr style="background:#F6F6F6;">
+            <td style="padding:8px 12px;font-weight:600;">Page does not load</td>
+            <td style="padding:8px 12px;">Wait 1 minute and refresh. Contact your IT support if it continues.</td>
+          </tr>
+        </table>
+        <p style="margin-top:10px;margin-bottom:4px;font-size:0.8rem;color:{MONASH_GREY};">
+          For anything not listed above, download the full guide below or contact your placement team administrator.
+        </p>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        f'<p style="font-size:0.85rem;font-weight:600;color:{MONASH_DARK};">Full User Guide (Word document)</p>',
+        unsafe_allow_html=True
+    )
+    try:
+        with open("Placement_Schedule_Generator_User_Guide.docx", "rb") as f:
+            st.download_button(
+                label="Download User Guide (.docx)",
+                data=f.read(),
+                file_name="Placement_Schedule_Generator_User_Guide.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+    except FileNotFoundError:
+        st.info("Place the file 'Placement_Schedule_Generator_User_Guide.docx' in the same folder as app.py to enable this download.")
+
+with tab_inplace:
+    st.markdown("""
+    <div style="padding:0.5rem 0 0.2rem">
+    <h3 style="color:#2E7D32;font-size:1.1rem;font-weight:700;margin-bottom:4px;">Downloading from InPlace (iReport)</h3>
+    <p style="color:#5A5A5A;font-size:0.85rem;margin-bottom:1.2rem;">
+        Follow these steps each year to get the InPlace student export file.
+    </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#2E7D32;">What to download</span>
+          <p class="step-title">iReport — 1st & 2nd year placement (non-method, non-HPE)</p>
+        </div>
+        <p style="font-size:0.85rem;color:{MONASH_GREY};margin-bottom:8px;">
+          The InPlace export must include all of these columns. Do not delete or rename any columns after downloading.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;">
+          <tr style="background:#1B5E20;color:white;">
+            <th style="padding:8px 12px;text-align:left;font-weight:600;width:35%;">Column name</th>
+            <th style="padding:8px 12px;text-align:left;font-weight:600;">What it is used for</th>
+          </tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Student</td><td style="padding:7px 12px;">Full student name</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Email</td><td style="padding:7px 12px;">Matches the student to their Google Form response</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Student Code</td><td style="padding:7px 12px;">Monash student ID number</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Agency</td><td style="padding:7px 12px;">School name — one Excel file is created per school</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Start Date</td><td style="padding:7px 12px;">Used to filter by year (can be blank for unplaced students)</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">End Date</td><td style="padding:7px 12px;">Defines the placement date window</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Status</td><td style="padding:7px 12px;">Completed students are automatically excluded</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Requirement Groups</td><td style="padding:7px 12px;">Contains the year — includes unplaced students with blank Start Date</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Placement Allocation Groups</td><td style="padding:7px 12px;">Backup year filter</td></tr>
+        </table>
+        """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#2E7D32;">Steps</span>
+          <p class="step-title">How to download</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        steps_ip = [
+            ("1", "Log in to InPlace", "Open your browser and go to the InPlace website. Sign in with your Monash staff credentials."),
+            ("2", "Go to iReport", "From the InPlace menu, navigate to iReport. [Add your team's exact navigation path here.]"),
+            ("3", "Select the correct report", "Choose the placement report for 1st and 2nd year students, non-method and non-HPE, for the current year."),
+            ("4", "Download as Excel", "Click the download or export button. Choose Excel (.xlsx). Save it to your Desktop or Downloads folder."),
+            ("5", "Do not edit the file", "Upload it to the app exactly as downloaded. Do not open it in Excel or rename any columns."),
+        ]
+        html = ""
+        for num, title, detail in steps_ip:
+            html += f"""
+            <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:14px;">
+              <div style="background:#2E7D32;color:white;font-size:0.75rem;font-weight:700;
+                          width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+                          justify-content:center;flex-shrink:0;margin-top:1px;">{num}</div>
+              <div>
+                <div style="font-size:0.88rem;font-weight:600;color:{MONASH_DARK};margin-bottom:3px;">{title}</div>
+                <div style="font-size:0.82rem;color:{MONASH_GREY};">{detail}</div>
+              </div>
+            </div>"""
+        st.markdown(html, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#2E7D32;">Auto-filters</span>
+          <p class="step-title">What the app removes automatically — nothing you need to do</p>
+        </div>
+        <ul style="font-size:0.83rem;color:{MONASH_DARK};margin:0;padding-left:20px;line-height:1.9;">
+          <li>Schools starting with <strong>EDU -</strong> are excluded (these are unplaced students in InPlace)</li>
+          <li>Students with <strong>Status = Completed</strong> are excluded</li>
+          <li>Only students whose <strong>Requirement Groups</strong> or <strong>Placement Allocation Groups</strong> contain the selected year are included</li>
+          <li>Students with a <strong>blank Start Date</strong> are still included if their Requirement Groups match the year</li>
+        </ul>
+        """, unsafe_allow_html=True)
+
+
+with tab_form:
+    st.markdown(f"""
+    <div style="padding:0.5rem 0 0.2rem">
+    <h3 style="color:#6A1B9A;font-size:1.1rem;font-weight:700;margin-bottom:4px;">Downloading the Google Form Responses</h3>
+    <p style="color:{MONASH_GREY};font-size:0.85rem;margin-bottom:1.2rem;">
+        Follow these steps each year to download the student availability responses.
+    </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#6A1B9A;">Download link</span>
+          <p class="step-title">Go to this Google Sheet to download responses</p>
+        </div>
+        <p style="font-size:0.88rem;color:{MONASH_DARK};margin-bottom:8px;">
+          Click the link below to open the Google Sheet, then follow the steps underneath.
+        </p>
+        <a href="https://docs.google.com/spreadsheets/d/1n7dj0ikEaxphvFeGIFAMlUXpkcB9WEqrzq4b733dG04/edit"
+           target="_blank"
+           style="display:inline-block;background:#6A1B9A;color:white;padding:8px 18px;
+                  border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;margin-bottom:8px;">
+          Open Google Sheet (Form Responses)
+        </a>
+        """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#6A1B9A;">Steps</span>
+          <p class="step-title">How to download</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        steps_form = [
+            ("1", "Open the Google Sheet", "Click the purple button above to open the sheet. Make sure you are logged in with your Monash Google account."),
+            ("2", "Click File in the top menu", "In Google Sheets, click File in the top left menu bar."),
+            ("3", "Click Download, then CSV", "Hover over Download, then click Comma Separated Values (.csv). The file downloads automatically."),
+            ("4", "Save the file — do not open it", "Save it to your Desktop or Downloads folder. Do NOT open it in Excel before uploading — Excel changes the date format inside and causes the app to fail."),
+        ]
+        html = ""
+        for num, title, detail in steps_form:
+            html += f"""
+            <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:14px;">
+              <div style="background:#6A1B9A;color:white;font-size:0.75rem;font-weight:700;
+                          width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+                          justify-content:center;flex-shrink:0;margin-top:1px;">{num}</div>
+              <div>
+                <div style="font-size:0.88rem;font-weight:600;color:{MONASH_DARK};margin-bottom:3px;">{title}</div>
+                <div style="font-size:0.82rem;color:{MONASH_GREY};">{detail}</div>
+              </div>
+            </div>"""
+        st.markdown(html, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
+          <span class="step-badge" style="background:#6A1B9A;">Updating dates each year</span>
+          <p class="step-title">Only change the date options — nothing else</p>
+        </div>
+        <p style="font-size:0.85rem;color:{MONASH_DARK};margin-bottom:10px;">
+          Each year, update the date options in the <strong>'What days will you be attending placement?'</strong> question.
+          Everything else in the form stays the same.
+        </p>
+        <a href="https://docs.google.com/forms/d/1qITdAUy9iBiw_dLbwkgibNyctydnzqxlMrcf9QHXRMk/edit"
+           target="_blank"
+           style="display:inline-block;background:#6A1B9A;color:white;padding:8px 18px;
+                  border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;margin-bottom:14px;">
+          Open Google Form to Edit
+        </a>
+        <div style="background:#F3E5F5;border-left:4px solid #6A1B9A;border-radius:4px;
+                    padding:10px 14px;font-size:0.83rem;color:{MONASH_DARK};margin-bottom:10px;">
+          <strong style="color:#6A1B9A;">Date format — must be exact:</strong><br>
+          Write each date as &nbsp;<strong>Weekday &nbsp; Month &nbsp; Day</strong><br>
+          <span style="color:#6A1B9A;font-weight:600;">Monday July 21 &nbsp;&nbsp; Tuesday July 22 &nbsp;&nbsp; Friday August 8</span><br>
+          <span style="color:{MONASH_GREY};font-size:0.8rem;">No year. No commas. No slashes. No ordinals (not 21st, not 22nd).</span>
+        </div>
+        <div style="background:#FFF3E0;border-left:4px solid #F57C00;border-radius:4px;
+                    padding:10px 14px;font-size:0.83rem;color:{MONASH_DARK};">
+          <strong style="color:#F57C00;">Column names must never change.</strong>
+          The form has 8 columns (Timestamp, Email address, Name, etc.) — do not rename, delete, or reorder them.
+          The app reads them by name.
+        </div>
+        """, unsafe_allow_html=True)
+
+
+with tab_main:
+    pass  # placeholder — actual content is indented below
+
 
 # ════════════════════════════════════════════════════════════
-# STEP 1 — inside a bordered container
+# STEP 1 — Upload both files
 # ════════════════════════════════════════════════════════════
 with st.container(border=True):
     st.markdown("""
     <div class="step-header">
       <span class="step-badge">Step 1</span>
-      <p class="step-title">Upload your Google Form CSV</p>
+      <p class="step-title">Upload your files</p>
     </div>
     """, unsafe_allow_html=True)
 
-    uploaded = st.file_uploader(
-        "Upload CSV",
-        type="csv",
-        label_visibility="collapsed",
-    )
+    col1, col2 = st.columns(2)
 
-    if uploaded:
-        try:
-            raw = load_csv(uploaded)
-        except Exception as e:
-            st.error(f"Could not read the CSV: {e}")
-            st.stop()
+    with col1:
+        st.markdown(
+            f'<p style="font-size:0.83rem;font-weight:600;color:{MONASH_DARK};margin-bottom:6px;">'
+            f'InPlace Export (CSV or Excel)</p>',
+            unsafe_allow_html=True,
+        )
+        inplace_file = st.file_uploader(
+            "InPlace", type=["csv", "xlsx", "xls"],
+            label_visibility="collapsed", key="inplace"
+        )
 
+    with col2:
+        st.markdown(
+            f'<p style="font-size:0.83rem;font-weight:600;color:{MONASH_DARK};margin-bottom:6px;">'
+            f'Google Form Response (CSV or Excel)</p>',
+            unsafe_allow_html=True,
+        )
+        form_file = st.file_uploader(
+            "Form", type=["csv", "xlsx", "xls"],
+            label_visibility="collapsed", key="form"
+        )
+
+    if inplace_file and form_file:
         try:
-            year = extract_year(raw)
-            ordered_dates, day_lookup = detect_placement_dates(raw, year)
+            inplace_raw = load_inplace(inplace_file)
+            form_df     = load_form(form_file)
         except ValueError as e:
             st.error(str(e))
             st.stop()
 
+        available_years = get_available_years(inplace_raw)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            f'<p style="font-size:0.83rem;font-weight:600;color:{MONASH_DARK};margin-bottom:6px;">'
+            f'Select placement year</p>',
+            unsafe_allow_html=True,
+        )
+        selected_year = st.selectbox(
+            "Year", options=available_years,
+            label_visibility="collapsed"
+        )
+
+        # Filter InPlace by year and other rules
+        inplace_df, window_start, window_end = filter_inplace(inplace_raw, selected_year)
+
+        # Detect placement dates from the form.
+        # Form rows are filtered by timestamp year (students submit ~1 month
+        # before placement, so timestamp year always matches placement year).
+        try:
+            ordered_dates, day_lookup = detect_placement_dates(form_df, selected_year)
+        except Exception:
+            # Work out what years ARE in the form so we can tell the user
+            try:
+                import pandas as _pd
+                form_years = sorted(
+                    _pd.to_datetime(form_df["timestamp"], dayfirst=True, errors="coerce")
+                    .dt.year.dropna().astype(int).unique().tolist(),
+                    reverse=True
+                )
+                form_years = [str(y) for y in form_years]
+            except Exception:
+                form_years = ["unknown"]
+
+            st.error(
+                f"**Year mismatch detected.**\n\n"
+                f"You selected **{selected_year}** from the InPlace file, "
+                f"but the Google Form responses are from **{', '.join(form_years)}**.\n\n"
+                f"Please make sure both files are for the same placement year "
+                f"and try again."
+            )
+            st.stop()
+
         short_labels, week_of, week_labels, range_label = build_schedule_labels(ordered_dates)
+
+        # Build master join
+        master_df, no_placement_df = build_master(inplace_df, form_df, day_lookup)
+
+        if len(inplace_df) == 0:
+            st.warning(
+                f"No students found in the InPlace file for {selected_year}. "
+                f"The available year(s) in this file are: {available_years}. "
+                f"Please select a different year."
+            )
+            st.stop()
+
+        all_schools  = sorted(master_df["agency"].dropna().unique())
+        n_submitted  = master_df["submitted"].sum()
+        n_no_sub     = (~master_df["submitted"]).sum()
+        n_no_place   = len(no_placement_df)
 
         st.markdown(f"""
         <div class="metrics-row">
           <div class="metric-card">
-            <div class="metric-label">Students</div>
-            <div class="metric-value">{len(raw)}</div>
-            <div class="metric-sub">form responses</div>
+            <div class="metric-label">InPlace students</div>
+            <div class="metric-value">{len(inplace_df)}</div>
+            <div class="metric-sub">after filters ({selected_year})</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">Schools</div>
-            <div class="metric-value">{raw['school'].nunique()}</div>
-            <div class="metric-sub">unique schools</div>
+            <div class="metric-label">Form submissions</div>
+            <div class="metric-value">{n_submitted}</div>
+            <div class="metric-sub">matched to InPlace</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">Placement days</div>
-            <div class="metric-value">15</div>
-            <div class="metric-sub">working days</div>
+            <div class="metric-label">No preference</div>
+            <div class="metric-value">{n_no_sub}</div>
+            <div class="metric-sub">in InPlace, no form</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">No placement</div>
+            <div class="metric-value">{n_no_place}</div>
+            <div class="metric-sub">form only, no InPlace</div>
           </div>
         </div>
         <div class="period-box">
@@ -345,10 +691,10 @@ with st.container(border=True):
         </div>
         """, unsafe_allow_html=True)
 
-if not uploaded:
+if not (inplace_file and form_file):
     st.markdown(
         f'<p style="text-align:center;color:#aaa;font-size:0.82rem;margin-top:0.4rem;">'
-        f'Upload the CSV downloaded from Google Forms to continue</p>',
+        f'Upload both files above to continue</p>',
         unsafe_allow_html=True,
     )
     st.stop()
@@ -356,7 +702,7 @@ if not uploaded:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
-# STEP 2 — inside a bordered container
+# STEP 2 — Choose schools
 # ════════════════════════════════════════════════════════════
 with st.container(border=True):
     st.markdown("""
@@ -366,13 +712,16 @@ with st.container(border=True):
     </div>
     """, unsafe_allow_html=True)
 
-    all_schools = sorted(raw["school"].dropna().unique())
-
     export_mode = st.radio(
         "Export mode",
         ["All schools", "Selected schools only"],
         horizontal=True,
         label_visibility="collapsed",
+    )
+
+    include_no_placement = st.checkbox(
+        "Include 'No Placement Assigned' file (students in form but not in InPlace)",
+        value=True,
     )
 
     if export_mode == "All schools":
@@ -403,10 +752,19 @@ with st.container(border=True):
             unsafe_allow_html=True,
         )
 
+    if n_no_sub > 0:
+        st.markdown(
+            f'<div class="info-box">'
+            f'{n_no_sub} student(s) in InPlace have not submitted the form. '
+            f'They will appear at the bottom of their school sheet marked '
+            f'"No preference submitted".</div>',
+            unsafe_allow_html=True,
+        )
+
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
-# STEP 3 — inside a bordered container
+# STEP 3 — Generate
 # ════════════════════════════════════════════════════════════
 with st.container(border=True):
     st.markdown("""
@@ -424,25 +782,41 @@ with st.container(border=True):
     )
 
     if generate:
-        long_df      = expand_long(raw, day_lookup)
+        schools_data = []
+        total_files  = n_schools + (1 if include_no_placement and n_no_place > 0 else 0)
         progress_bar = st.progress(0)
         status_text  = st.empty()
-        schools_data = []
 
         for idx, school in enumerate(schools_to_export):
-            pct = (idx + 1) / n_schools
-            progress_bar.progress(pct)
+            progress_bar.progress((idx + 1) / total_files)
             status_text.markdown(
                 f'<div class="progress-label">'
-                f'Building {idx + 1} of {n_schools}: {school}</div>',
+                f'Building {idx + 1} of {total_files}: {school}</div>',
                 unsafe_allow_html=True,
             )
-            mat      = build_matrix(school, raw, long_df, ordered_dates)
+            mat      = build_matrix_from_master(school, master_df, ordered_dates)
             wb       = build_workbook(school, mat, ordered_dates,
                                       short_labels, week_of, week_labels, range_label)
             wb_bytes = workbook_to_bytes(wb)
             safe     = re.sub(r'[\\/:*?"<>|]', "_", school).strip()
             schools_data.append((f"{safe}.xlsx", wb_bytes))
+
+        # No placement file
+        if include_no_placement and n_no_place > 0:
+            progress_bar.progress(1.0)
+            status_text.markdown(
+                f'<div class="progress-label">'
+                f'Building: No Placement Assigned file...</div>',
+                unsafe_allow_html=True,
+            )
+            wb_np    = build_no_placement_workbook(
+                no_placement_df, ordered_dates, short_labels,
+                week_of, week_labels, range_label
+            )
+            schools_data.append((
+                f"No_Placement_Assigned_{selected_year}.xlsx",
+                workbook_to_bytes(wb_np)
+            ))
 
         progress_bar.empty()
         status_text.empty()
@@ -468,16 +842,14 @@ with st.container(border=True):
             st.download_button(
                 label=f"Download all {n} files as ZIP",
                 data=zip_bytes,
-                file_name=f"placement_schedules_{ordered_dates[0].year}.zip",
+                file_name=f"placement_schedules_{selected_year}.zip",
                 mime="application/zip",
                 use_container_width=True,
             )
 
-# ── Footer ───────────────────────────────────────────────────
 st.markdown(
     '<div class="monash-footer">'
     'Monash University &nbsp;·&nbsp; Faculty of Education &nbsp;·&nbsp; Placement Schedule Generator'
     '</div>',
     unsafe_allow_html=True,
 )
-# placeholder - reading current file

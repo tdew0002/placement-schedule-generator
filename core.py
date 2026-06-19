@@ -37,24 +37,57 @@ def read_file(source) -> pd.DataFrame:
 def load_inplace(source) -> pd.DataFrame:
     """
     Load the InPlace export. Expects these columns (position-independent):
-      Student, Email, Student Code, Agency,
-      Start Date, Status, Placement Allocation Groups
+      Student, Email, Agency, Start Date, Status, Placement Allocation Groups
+
+    Note: Student Code is NOT required from InPlace — the Monash Student ID
+    is sourced from the Google Form instead (see load_form / build_master).
     """
     df = read_file(source)
 
-    required = ["Student", "Email", "Student Code", "Agency",
+    required = ["Student", "Email", "Agency",
                 "Start Date", "Status", "Placement Allocation Groups"]
     missing = [c for c in required if c not in df.columns]
+
     if missing:
-        raise ValueError(
-            f"InPlace file is missing these columns: {missing}\n"
-            f"Found columns: {list(df.columns)}"
+        # Email is NOT included in iReport by default — it must be manually
+        # ticked under iReport's "Add Column" option. Give a specific,
+        # friendly explanation for this column rather than a generic
+        # "missing columns" error, since this is the most common mistake
+        # non-technical staff make.
+        special_cols = [c for c in missing if c == "Email"]
+        other_cols   = [c for c in missing if c != "Email"]
+
+        message_parts = []
+
+        if special_cols:
+            message_parts.append(
+                f"Your InPlace file is missing 'Email'.\n\n"
+                f"This usually happens because Email is NOT included in "
+                f"the iReport export by default — it must be added manually.\n\n"
+                f"To fix this:\n"
+                f"  1. Go back to iReport\n"
+                f"  2. Find the 'Add Column' option (near the report filters or column settings)\n"
+                f"  3. Tick the box next to 'Email'\n"
+                f"  4. Apply the changes and download the report again\n\n"
+                f"See the 'How to Download InPlace' tab in this app for a full walkthrough."
+            )
+
+        if other_cols:
+            message_parts.append(
+                f"Your InPlace file is also missing: {', '.join(other_cols)}.\n"
+                f"Please check that you have downloaded the correct InPlace report "
+                f"and that no columns were removed or renamed after downloading."
+            )
+
+        message_parts.append(
+            f"\nColumns found in your file: {list(df.columns)}"
         )
+
+        raise ValueError("\n\n".join(message_parts))
 
     df["Email"]         = df["Email"].astype(str).str.strip().str.lower()
     df["Agency"]        = df["Agency"].astype(str).str.strip()
     df["Student"]       = df["Student"].astype(str).str.strip()
-    df["Student Code"]  = df["Student Code"].astype(str).str.strip()
     df["Start Date"]    = pd.to_datetime(df["Start Date"], errors="coerce")
     df["Status"]        = df["Status"].astype(str).str.strip()
 
@@ -72,6 +105,108 @@ def get_available_years(inplace_df: pd.DataFrame) -> list:
     return sorted([int(y) for y in years], reverse=True)
 
 
+def _is_blank_text(series: pd.Series) -> pd.Series:
+    """
+    Robust blank check for a text column. Catches real NaN, empty string,
+    and the literal text "nan"/"none"/"<na>" that astype(str) sometimes
+    produces depending on column dtype and how the Excel/CSV file stored
+    the empty cell.
+    """
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin(["", "nan", "none", "<na>"]) | s.isna()
+
+
+def get_status_breakdown(inplace_df: pd.DataFrame, year: int) -> dict:
+    """
+    Count Confirmed / Withdrawn / No Placement / Other students for the
+    selected year, BEFORE the Confirmed-only filter is applied. This gives
+    staff visibility into the full picture, even though only Confirmed
+    students (with a real Agency) are included in the final school exports.
+
+    "No Placement" = student needs a placement but has not been assigned
+    one yet: blank Status AND blank Agency (and NOT an 'EDU -' agency,
+    since those students don't need a placement at all).
+
+    Uses the same year-matching logic as filter_inplace (Requirement Groups
+    or Placement Allocation Groups containing the year, with Start Date
+    matching the year or being blank) so the counts are for the same
+    student population that filter_inplace operates on.
+    """
+    df = inplace_df.copy()
+
+    req_has_year = df["Requirement Groups"].astype(str).str.contains(
+        str(year), na=False
+    )
+    alloc_has_year = df["Placement Allocation Groups"].astype(str).str.contains(
+        str(year), na=False
+    )
+    group_year_ok = req_has_year | alloc_has_year
+
+    start_year_ok = (
+        df["Start Date"].dt.year == year
+    ) | df["Start Date"].isna()
+
+    df = df[group_year_ok & start_year_ok]
+
+    # Exclude EDU - agencies (students who don't need a placement at all)
+    df = df[~df["Agency"].str.startswith("EDU -", na=False)]
+
+    status_lower = df["Status"].astype(str).str.lower()
+
+    agency_blank = _is_blank_text(df["Agency"])
+    status_blank = _is_blank_text(df["Status"])
+
+    is_no_placement = agency_blank & status_blank
+    is_confirmed    = (status_lower == "confirmed") & ~is_no_placement
+    # Match "Withdrawn", "Withdrawn-Student", "Withdrawn-Agency", etc. —
+    # InPlace uses "Withdrawn" as a prefix with a suffix describing who
+    # withdrew, so we match anything starting with "withdrawn".
+    is_withdrawn    = status_lower.str.startswith("withdrawn", na=False) & ~is_no_placement
+
+    n_no_placement = int(is_no_placement.sum())
+    n_confirmed    = int(is_confirmed.sum())
+    n_withdrawn    = int(is_withdrawn.sum())
+    n_other        = len(df) - n_confirmed - n_withdrawn - n_no_placement
+
+    return {
+        "confirmed":     n_confirmed,
+        "withdrawn":     n_withdrawn,
+        "no_placement":  n_no_placement,
+        "other":         int(n_other),
+    }
+
+
+def get_no_placement_students(inplace_df: pd.DataFrame, year: int) -> pd.DataFrame:
+    """
+    Return InPlace rows for students who need a placement but have not
+    been assigned one yet (blank Status AND blank Agency, excluding
+    'EDU -' agencies which mean no placement is required at all).
+
+    Uses the same year-matching logic as filter_inplace.
+    """
+    df = inplace_df.copy()
+
+    req_has_year = df["Requirement Groups"].astype(str).str.contains(
+        str(year), na=False
+    )
+    alloc_has_year = df["Placement Allocation Groups"].astype(str).str.contains(
+        str(year), na=False
+    )
+    group_year_ok = req_has_year | alloc_has_year
+
+    start_year_ok = (
+        df["Start Date"].dt.year == year
+    ) | df["Start Date"].isna()
+
+    df = df[group_year_ok & start_year_ok]
+    df = df[~df["Agency"].str.startswith("EDU -", na=False)]
+
+    agency_blank = _is_blank_text(df["Agency"])
+    status_blank = _is_blank_text(df["Status"])
+
+    return df[agency_blank & status_blank].reset_index(drop=True)
+
+
 def filter_inplace(inplace_df: pd.DataFrame, year: int):
     """
     Apply all filters to the InPlace data:
@@ -86,7 +221,7 @@ def filter_inplace(inplace_df: pd.DataFrame, year: int):
 
       Then:
         Exclude agencies starting with 'EDU -'
-        Exclude Status == 'Completed'
+        Keep only Status == 'Confirmed' (Withdrawn, Offer, blank, etc. excluded)
 
     Returns:
       filtered_df   — the filtered InPlace DataFrame
@@ -123,8 +258,8 @@ def filter_inplace(inplace_df: pd.DataFrame, year: int):
     # Exclude EDU - agencies
     df = df[~df["Agency"].str.startswith("EDU -", na=False)]
 
-    # Exclude Completed status (blank is allowed)
-    df = df[df["Status"].str.lower() != "completed"]
+    # Keep only Confirmed status (Withdrawn, Offer, blank, etc. are excluded)
+    df = df[df["Status"].str.lower() == "confirmed"]
 
     return df.reset_index(drop=True), window_start, window_end
 
@@ -273,26 +408,15 @@ def build_schedule_labels(ordered_dates: list):
 
 # ── Master join ──────────────────────────────────────────────
 
-def build_master(inplace_df: pd.DataFrame,
-                 form_df: pd.DataFrame,
-                 day_lookup: dict) -> tuple:
+def _build_form_lookup(form_df: pd.DataFrame, day_lookup: dict) -> dict:
     """
-    Join InPlace (filtered) with Form responses on email.
+    Build a lookup: email -> {pref_name, days set, submitted, student_id}
 
-    Only form rows where at least one day falls within the day_lookup
-    (i.e. within the selected year's placement window) are treated as
-    valid submissions. This handles students who submitted the form in
-    multiple years — only the relevant year's submission is used.
-
-    Returns:
-        master_df       — one row per student, with all fields + date columns
-        no_placement_df — form submissions with no InPlace record
+    Since form_df is already filtered by timestamp year in
+    detect_placement_dates, only the current year's submissions are
+    considered here. If a student submitted multiple times in the same
+    year, the submission with the most days in the placement window wins.
     """
-    # Build form lookup: email -> {pref_name, days set}
-    # Since form is already filtered by timestamp year in detect_placement_dates,
-    # only the current year's submissions reach here.
-    # If a student submitted multiple times in the same year, keep the one
-    # with the most days in the placement window.
     form_lookup = {}
     for _, row in form_df.iterrows():
         email = row["email"]
@@ -307,44 +431,69 @@ def build_master(inplace_df: pd.DataFrame,
             existing = form_lookup.get(email, {})
             if len(days) >= len(existing.get("days", set())):
                 form_lookup[email] = {
-                    "pref_name": row["pref_name"],
-                    "days":      days,
-                    "submitted": True,
+                    "pref_name":  row["pref_name"],
+                    "days":       days,
+                    "submitted":  True,
+                    "student_id": row["student_id"],
                 }
+    return form_lookup
 
-    # Students in form but not in InPlace
-    inplace_emails = set(inplace_df["Email"].str.lower().str.strip())
-    no_placement_rows = []
-    for _, row in form_df.iterrows():
-        if row["email"] not in inplace_emails:
-            no_placement_rows.append({
-                "student_name": row["full_name"],
-                "pref_name":    row["pref_name"],
-                "email":        row["email"],
-                "student_id":   row["student_id"],
-                "agency":       "— No placement assigned —",
-                "submitted":    True,
-                "days":         form_lookup.get(row["email"], {}).get("days", set()),
-            })
-    no_placement_df = pd.DataFrame(no_placement_rows)
 
-    # Build master from InPlace
+def build_master(inplace_df: pd.DataFrame,
+                 form_df: pd.DataFrame,
+                 day_lookup: dict) -> pd.DataFrame:
+    """
+    Join InPlace (already filtered to Confirmed students with a real
+    Agency) with Form responses on email.
+
+    Returns:
+        master_df — one row per student, with all fields + date columns
+    """
+    form_lookup = _build_form_lookup(form_df, day_lookup)
+
     master_rows = []
     for _, ip_row in inplace_df.iterrows():
         email      = ip_row["Email"].lower().strip()
-        form_data  = form_lookup.get(email, {"pref_name": "", "days": set(), "submitted": False})
+        form_data  = form_lookup.get(email, {"pref_name": "", "days": set(), "submitted": False, "student_id": ""})
         master_rows.append({
             "student_name": ip_row["Student"],
             "pref_name":    form_data["pref_name"],   # from form only
             "email":        email,
-            "student_id":   ip_row["Student Code"],
+            "student_id":   form_data.get("student_id", ""),  # from form only
             "agency":       clean_school_name(ip_row["Agency"]),
             "submitted":    form_data["submitted"],
             "days":         form_data["days"],
         })
 
-    master_df = pd.DataFrame(master_rows)
-    return master_df, no_placement_df
+    return pd.DataFrame(master_rows)
+
+
+def build_no_placement_df(no_placement_inplace: pd.DataFrame,
+                           form_df: pd.DataFrame,
+                           day_lookup: dict) -> pd.DataFrame:
+    """
+    Build the "No Placement" student list directly from InPlace rows
+    (blank Status AND blank Agency, excluding 'EDU -' — see
+    get_no_placement_students). Each student is enriched with their Form
+    submission (preferred name + selected days) if they happen to have
+    submitted the form already, even though they have no placement yet.
+    """
+    form_lookup = _build_form_lookup(form_df, day_lookup)
+
+    rows = []
+    for _, ip_row in no_placement_inplace.iterrows():
+        email     = ip_row["Email"].lower().strip()
+        form_data = form_lookup.get(email, {"pref_name": "", "days": set(), "submitted": False, "student_id": ""})
+        rows.append({
+            "student_name": ip_row["Student"],
+            "pref_name":    form_data["pref_name"],
+            "email":        email,
+            "student_id":   form_data.get("student_id", ""),
+            "submitted":    form_data["submitted"],
+            "days":         form_data["days"],
+        })
+
+    return pd.DataFrame(rows)
 
 
 # ── Build attendance matrix for one school ───────────────────
@@ -586,7 +735,7 @@ def build_workbook(school, mat, ordered_dates, short_labels,
     return wb
 
 
-# ── Build "No Placement Assigned" workbook ───────────────────
+# ── Build "No Placement" workbook ─────────────────────────────
 
 def build_no_placement_workbook(no_placement_df: pd.DataFrame,
                                  ordered_dates: list,
@@ -594,27 +743,32 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
                                  week_of: list,
                                  week_labels: list,
                                  range_label: str) -> Workbook:
-    """One workbook for students who submitted the form but have no InPlace record."""
+    """
+    Workbook listing students who need a placement but have not been
+    assigned one yet in InPlace (blank Status and blank Agency).
+    If a student has also submitted the Google Form, their preferred
+    name and selected days are shown too.
+    """
 
-    n_fixed    = 4   # Name | Email | Student ID | Days submitted
+    n_fixed    = 5   # Name | Email | Student ID | Preferred Name | Submitted Form?
     n_days     = 15
     total_cols = n_fixed + n_days
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "No Placement Assigned"
+    ws.title = "No Placement"
     ws.sheet_view.showGridLines = False
 
     ws.merge_cells(merge_range(1, 1, 1, total_cols))
-    c = ws.cell(1, 1, "Students Without a Placement Assignment")
+    c = ws.cell(1, 1, "Students Awaiting Placement Assignment")
     style_cell(c, bg=NAVY, fg="FFFFFF", bold=True, size=14,
                border_colour="FFFFFF")
     ws.row_dimensions[1].height = 32
 
     ws.merge_cells(merge_range(2, 1, 2, total_cols))
     c = ws.cell(2, 1,
-        f"These students submitted the Google Form but have no agency assigned in InPlace  |  "
-        f"Period: {range_label}")
+        f"These students are in InPlace with no Status and no Agency assigned yet "
+        f"(placement not yet confirmed)  |  Period: {range_label}")
     style_cell(c, bg=MID_NAVY, fg="E3F2FD", size=11,
                wrap=True, border_colour="FFFFFF")
     ws.row_dimensions[2].height = 22
@@ -634,7 +788,7 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
 
     # Column headers
     headers = ["Full Name", "Email Address", "Student ID",
-               "Preferred Name"] + short_labels
+               "Preferred Name", "Submitted Form?"] + short_labels
     for ci, h in enumerate(headers, 1):
         c = ws.cell(4, ci, h)
         style_cell(c, bg=DARK_NAVY, fg="FFFFFF", bold=True,
@@ -643,15 +797,23 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
 
     data_start = 5
     for r_idx, row in no_placement_df.reset_index(drop=True).iterrows():
-        rn     = data_start + r_idx
-        row_bg = ALT_ROW if r_idx % 2 == 1 else None
+        rn         = data_start + r_idx
+        submitted  = row.get("submitted", False)
+        row_bg     = ALT_ROW if r_idx % 2 == 1 else None
 
-        for ci, val in enumerate(
-            [row.get("student_name", ""), row.get("email", ""),
-             row.get("student_id", ""), row.get("pref_name", "")], 1
-        ):
+        fixed_vals = [
+            row.get("student_name", ""), row.get("email", ""),
+            row.get("student_id", ""), row.get("pref_name", ""),
+            "Yes" if submitted else "No",
+        ]
+        for ci, val in enumerate(fixed_vals, 1):
             c = ws.cell(rn, ci, val)
-            style_cell(c, bg=row_bg, h_align="left")
+            if ci == 5:
+                style_cell(c, bg=row_bg,
+                           fg="1B5E20" if submitted else "999999",
+                           bold=submitted, h_align="center")
+            else:
+                style_cell(c, bg=row_bg, h_align="left")
 
         for di, d in enumerate(ordered_dates):
             ci  = n_fixed + di + 1
@@ -667,6 +829,7 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 13
     ws.column_dimensions["D"].width = 22
+    ws.column_dimensions["E"].width = 16
     for di in range(n_days):
         ws.column_dimensions[get_column_letter(n_fixed + di + 1)].width = 10
     ws.freeze_panes = ws.cell(data_start, n_fixed + 1)

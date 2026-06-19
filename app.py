@@ -9,10 +9,13 @@ from core import (
     load_form,
     get_available_years,
     filter_inplace,
+    get_status_breakdown,
+    get_no_placement_students,
     detect_placement_dates,
     extract_year_from_form,
     build_schedule_labels,
     build_master,
+    build_no_placement_df,
     build_matrix_from_master,
     build_workbook,
     build_no_placement_workbook,
@@ -401,6 +404,40 @@ with tab_inplace:
     with st.container(border=True):
         st.markdown(f"""
         <div class="step-header">
+          <span class="step-badge" style="background:#E65100;">Read this first</span>
+          <p class="step-title">Email must be added manually</p>
+        </div>
+        <div style="background:#FFF3E0;border:2px solid #F57C00;border-radius:8px;
+                    padding:16px 18px;">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+            <span style="font-size:1.4rem;">⚠️</span>
+            <span style="font-size:0.95rem;font-weight:700;color:#E65100;">
+              This column is NOT included by default
+            </span>
+          </div>
+          <p style="font-size:0.87rem;color:{MONASH_DARK};margin:0 0 12px;line-height:1.7;">
+            <strong>Email</strong> does not appear in the standard
+            iReport export. If you skip this step, the app will not be able to match students
+            to their Google Form responses, and will show an error when you try to upload the file.
+          </p>
+          <div style="background:white;border-radius:6px;padding:14px 16px;">
+            <p style="font-size:0.85rem;font-weight:700;color:#E65100;margin:0 0 8px;">
+              Before downloading from iReport, do this:
+            </p>
+            <ol style="font-size:0.86rem;color:{MONASH_DARK};margin:0;padding-left:22px;line-height:2;">
+              <li>Open the report in iReport</li>
+              <li>Find the <strong>"Add Column"</strong> option (usually near the report filters or column settings)</li>
+              <li>Tick the box next to <strong>Email</strong></li>
+              <li>Apply the changes — confirm the column now appears in the report preview</li>
+              <li>Then download the report as usual</li>
+            </ol>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(f"""
+        <div class="step-header">
           <span class="step-badge" style="background:#2E7D32;">What to download</span>
           <p class="step-title">iReport — 1st & 2nd year placement (non-method, non-HPE)</p>
         </div>
@@ -413,15 +450,18 @@ with tab_inplace:
             <th style="padding:8px 12px;text-align:left;font-weight:600;">What it is used for</th>
           </tr>
           <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Student</td><td style="padding:7px 12px;">Full student name</td></tr>
-          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Email</td><td style="padding:7px 12px;">Matches the student to their Google Form response</td></tr>
-          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Student Code</td><td style="padding:7px 12px;">Monash student ID number</td></tr>
-          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Agency</td><td style="padding:7px 12px;">School name — one Excel file is created per school</td></tr>
-          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Start Date</td><td style="padding:7px 12px;">Used to filter by year (can be blank for unplaced students)</td></tr>
-          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">End Date</td><td style="padding:7px 12px;">Defines the placement date window</td></tr>
-          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Status</td><td style="padding:7px 12px;">Completed students are automatically excluded</td></tr>
-          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Requirement Groups</td><td style="padding:7px 12px;">Contains the year — includes unplaced students with blank Start Date</td></tr>
-          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Placement Allocation Groups</td><td style="padding:7px 12px;">Backup year filter</td></tr>
+          <tr style="background:#FFF3E0;"><td style="padding:7px 12px;font-weight:600;color:#E65100;">Email&nbsp;⚠️</td><td style="padding:7px 12px;">Matches the student to their Google Form response — <strong>must be added via "Add Column" in iReport</strong></td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Agency</td><td style="padding:7px 12px;">School name — one Excel file is created per school</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Start Date</td><td style="padding:7px 12px;">Used to filter by year (can be blank for unplaced students)</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">End Date</td><td style="padding:7px 12px;">Defines the placement date window</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Status</td><td style="padding:7px 12px;">Only Confirmed students are included in the export</td></tr>
+          <tr style="background:#E8F5E9;"><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Requirement Groups</td><td style="padding:7px 12px;">Contains the year — includes unplaced students with blank Start Date</td></tr>
+          <tr><td style="padding:7px 12px;font-weight:600;color:#2E7D32;">Placement Allocation Groups</td><td style="padding:7px 12px;">Backup year filter</td></tr>
         </table>
+        <p style="font-size:0.78rem;color:{MONASH_GREY};margin-top:10px;">
+          Note: Student ID is sourced from the Google Form (Monash Student ID), not from InPlace —
+          you do not need to add a Student Code column.
+        </p>
         """, unsafe_allow_html=True)
 
     with st.container(border=True):
@@ -460,11 +500,14 @@ with tab_inplace:
           <p class="step-title">What the app removes automatically — nothing you need to do</p>
         </div>
         <ul style="font-size:0.83rem;color:{MONASH_DARK};margin:0;padding-left:20px;line-height:1.9;">
-          <li>Schools starting with <strong>EDU -</strong> are excluded (these are unplaced students in InPlace)</li>
-          <li>Students with <strong>Status = Completed</strong> are excluded</li>
+          <li>Schools starting with <strong>EDU -</strong> are excluded (these students don't need a placement at all)</li>
+          <li>Only students with <strong>Status = Confirmed</strong> are included in school exports — Withdrawn, blank, and any other status are excluded</li>
+          <li>Students with <strong>blank Status AND blank Agency</strong> (and not EDU-) are treated as <strong>awaiting placement</strong> — they go into the separate "No Placement" file instead of a school file</li>
           <li>Only students whose <strong>Requirement Groups</strong> or <strong>Placement Allocation Groups</strong> contain the selected year are included</li>
-          <li>Students with a <strong>blank Start Date</strong> are still included if their Requirement Groups match the year</li>
         </ul>
+        <p style="margin-top:10px;font-size:0.8rem;color:{MONASH_GREY};">
+          The Step 1 summary in the Generate Schedules tab shows how many students were Confirmed, Withdrawn, awaiting placement, or had another status, so you can see the full picture before exporting.
+        </p>
         """, unsafe_allow_html=True)
 
 
@@ -599,7 +642,44 @@ with st.container(border=True):
             inplace_raw = load_inplace(inplace_file)
             form_df     = load_form(form_file)
         except ValueError as e:
-            st.error(str(e))
+            error_text = str(e)
+
+            if "'Email'" in error_text and "iReport" in error_text:
+                # Specific, friendly guidance for the most common mistake:
+                # Email not ticked in iReport's Add Column option
+                st.markdown(f"""
+                <div style="background:#FFF3E0;border:1px solid #FFCC80;
+                            border-left:5px solid #E65100;border-radius:8px;
+                            padding:16px 20px;margin:8px 0;">
+                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                    <span style="font-size:1.3rem;">⚠️</span>
+                    <span style="font-size:1rem;font-weight:700;color:#E65100;">
+                      Your InPlace file is missing <strong>Email</strong>
+                    </span>
+                  </div>
+                  <p style="font-size:0.88rem;color:{MONASH_DARK};margin:0 0 10px;line-height:1.6;">
+                    This column is <strong>not included by default</strong> when you export
+                    from iReport — you must add it yourself before downloading.
+                  </p>
+                  <div style="background:white;border-radius:6px;padding:12px 16px;margin-bottom:10px;">
+                    <p style="font-size:0.85rem;font-weight:600;color:{MONASH_DARK};margin:0 0 8px;">
+                      How to fix this:
+                    </p>
+                    <ol style="font-size:0.85rem;color:{MONASH_DARK};margin:0;padding-left:20px;line-height:1.9;">
+                      <li>Go back to <strong>iReport</strong> in InPlace</li>
+                      <li>Find the <strong>"Add Column"</strong> option (near the report filters or column settings)</li>
+                      <li>Tick the box next to <strong>Email</strong></li>
+                      <li>Apply the changes, then download the report again</li>
+                      <li>Upload the new file here</li>
+                    </ol>
+                  </div>
+                  <p style="font-size:0.82rem;color:{MONASH_GREY};margin:0;">
+                    See the <strong>"How to Download InPlace"</strong> tab above for a full walkthrough with more detail.
+                  </p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.error(error_text)
             st.stop()
 
         available_years = get_available_years(inplace_raw)
@@ -617,6 +697,15 @@ with st.container(border=True):
 
         # Filter InPlace by year and other rules
         inplace_df, window_start, window_end = filter_inplace(inplace_raw, selected_year)
+
+        # Status breakdown (Confirmed / Withdrawn / No Placement / Other)
+        # for the selected year, calculated BEFORE the Confirmed-only filter
+        # narrows things down — so staff can see the full picture.
+        status_counts = get_status_breakdown(inplace_raw, selected_year)
+
+        # No-placement students, sourced directly from InPlace
+        # (blank Status AND blank Agency, excluding 'EDU -').
+        no_placement_inplace = get_no_placement_students(inplace_raw, selected_year)
 
         # Detect placement dates from the form.
         # Form rows are filtered by timestamp year (students submit ~1 month
@@ -647,9 +736,6 @@ with st.container(border=True):
 
         short_labels, week_of, week_labels, range_label = build_schedule_labels(ordered_dates)
 
-        # Build master join
-        master_df, no_placement_df = build_master(inplace_df, form_df, day_lookup)
-
         if len(inplace_df) == 0:
             st.warning(
                 f"No students found in the InPlace file for {selected_year}. "
@@ -658,10 +744,16 @@ with st.container(border=True):
             )
             st.stop()
 
+        # Build master join (Confirmed students with a real Agency only)
+        master_df = build_master(inplace_df, form_df, day_lookup)
+
+        # Build the No Placement list (sourced from InPlace, enriched with
+        # Form data if the student happens to have submitted already)
+        no_placement_df = build_no_placement_df(no_placement_inplace, form_df, day_lookup)
+
         all_schools  = sorted(master_df["agency"].dropna().unique())
         n_submitted  = master_df["submitted"].sum()
         n_no_sub     = (~master_df["submitted"]).sum()
-        n_no_place   = len(no_placement_df)
 
         st.markdown(f"""
         <div class="metrics-row">
@@ -680,10 +772,27 @@ with st.container(border=True):
             <div class="metric-value">{n_no_sub}</div>
             <div class="metric-sub">in InPlace, no form</div>
           </div>
-          <div class="metric-card">
+        </div>
+        <div class="metrics-row">
+          <div class="metric-card" style="border-left-color:#008A25;">
+            <div class="metric-label">Confirmed</div>
+            <div class="metric-value" style="color:#008A25;">{status_counts['confirmed']}</div>
+            <div class="metric-sub">included in export</div>
+          </div>
+          <div class="metric-card" style="border-left-color:#C62828;">
+            <div class="metric-label">Withdrawn</div>
+            <div class="metric-value" style="color:#C62828;">{status_counts['withdrawn']}</div>
+            <div class="metric-sub">excluded from export</div>
+          </div>
+          <div class="metric-card" style="border-left-color:#1565C0;">
             <div class="metric-label">No placement</div>
-            <div class="metric-value">{n_no_place}</div>
-            <div class="metric-sub">form only, no InPlace</div>
+            <div class="metric-value" style="color:#1565C0;">{status_counts['no_placement']}</div>
+            <div class="metric-sub">blank status &amp; agency</div>
+          </div>
+          <div class="metric-card" style="border-left-color:#F9A825;">
+            <div class="metric-label">Other status</div>
+            <div class="metric-value" style="color:#F9A825;">{status_counts['other']}</div>
+            <div class="metric-sub">excluded from export</div>
           </div>
         </div>
         <div class="period-box">
@@ -720,7 +829,7 @@ with st.container(border=True):
     )
 
     include_no_placement = st.checkbox(
-        "Include 'No Placement Assigned' file (students in form but not in InPlace)",
+        f"Include 'No Placement' file ({len(no_placement_df)} student(s) awaiting placement in InPlace)",
         value=True,
     )
 
@@ -783,7 +892,7 @@ with st.container(border=True):
 
     if generate:
         schools_data = []
-        total_files  = n_schools + (1 if include_no_placement and n_no_place > 0 else 0)
+        total_files  = n_schools + (1 if include_no_placement and len(no_placement_df) > 0 else 0)
         progress_bar = st.progress(0)
         status_text  = st.empty()
 
@@ -802,11 +911,11 @@ with st.container(border=True):
             schools_data.append((f"{safe}.xlsx", wb_bytes))
 
         # No placement file
-        if include_no_placement and n_no_place > 0:
+        if include_no_placement and len(no_placement_df) > 0:
             progress_bar.progress(1.0)
             status_text.markdown(
                 f'<div class="progress-label">'
-                f'Building: No Placement Assigned file...</div>',
+                f'Building: No Placement file...</div>',
                 unsafe_allow_html=True,
             )
             wb_np    = build_no_placement_workbook(
@@ -814,7 +923,7 @@ with st.container(border=True):
                 week_of, week_labels, range_label
             )
             schools_data.append((
-                f"No_Placement_Assigned_{selected_year}.xlsx",
+                f"No_Placement_{selected_year}.xlsx",
                 workbook_to_bytes(wb_np)
             ))
 

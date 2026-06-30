@@ -116,6 +116,55 @@ def _is_blank_text(series: pd.Series) -> pd.Series:
     return s.isin(["", "nan", "none", "<na>"]) | s.isna()
 
 
+def _status_rank(status_value, agency_value) -> int:
+    """
+    Priority rank for choosing a student's single 'winning' row when they
+    have multiple rows. LOWER rank wins.
+
+      0  Confirmed                  — beats everything
+      1  Withdrawn (any variant)    — beats EDU and blanks
+      2  Any other real status      — e.g. Offer
+      3  EDU - anything             — low priority (no placement needed)
+      4  Blank status               — lowest
+
+    Note: EDU is detected from the Agency, since 'EDU - Credit from previous
+    placement' etc. are agencies, not statuses.
+    """
+    s = str(status_value).strip().lower()
+    a = str(agency_value).strip().lower()
+
+    if s == "confirmed":
+        return 0
+    if s.startswith("withdrawn"):
+        return 1
+    if a.startswith("edu -"):
+        return 3
+    if s in ("", "nan", "none", "<na>"):
+        return 4
+    return 2
+
+
+def _dedupe_by_student(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse multiple rows per student (by Email) into one row, keeping
+    the highest-priority row per _status_rank (Confirmed > Withdrawn >
+    other > EDU > blank).
+    """
+    if len(df) == 0:
+        return df
+    df = df.copy()
+    df["_rank"] = [
+        _status_rank(s, a)
+        for s, a in zip(df["Status"], df["Agency"])
+    ]
+    df = (
+        df.sort_values("_rank", kind="stable")
+          .drop_duplicates(subset="Email", keep="first")
+          .drop(columns="_rank")
+    )
+    return df
+
+
 def get_status_breakdown(inplace_df: pd.DataFrame, year: int) -> dict:
     """
     Count Confirmed / Withdrawn / No Placement / Other students for the
@@ -148,31 +197,37 @@ def get_status_breakdown(inplace_df: pd.DataFrame, year: int) -> dict:
 
     df = df[group_year_ok & start_year_ok]
 
-    # Exclude EDU - agencies (students who don't need a placement at all)
-    df = df[~df["Agency"].str.startswith("EDU -", na=False)]
+    # Deduplicate FIRST, across ALL rows (including EDU), so each student is
+    # counted once by their winning row (Confirmed > Withdrawn > other >
+    # EDU > blank). This matches how filter_inplace picks the winning row.
+    df = _dedupe_by_student(df)
 
     status_lower = df["Status"].astype(str).str.lower()
+    agency_lower = df["Agency"].astype(str).str.strip().str.lower()
 
-    agency_blank = _is_blank_text(df["Agency"])
-    status_blank = _is_blank_text(df["Status"])
+    is_edu          = agency_lower.str.startswith("edu -", na=False)
+    agency_blank    = _is_blank_text(df["Agency"])
+    status_blank    = _is_blank_text(df["Status"])
 
-    is_no_placement = agency_blank & status_blank
-    is_confirmed    = (status_lower == "confirmed") & ~is_no_placement
-    # Match "Withdrawn", "Withdrawn-Student", "Withdrawn-Agency", etc. —
-    # InPlace uses "Withdrawn" as a prefix with a suffix describing who
-    # withdrew, so we match anything starting with "withdrawn".
-    is_withdrawn    = status_lower.str.startswith("withdrawn", na=False) & ~is_no_placement
+    is_no_placement = agency_blank & status_blank & ~is_edu
+    is_confirmed    = (status_lower == "confirmed")
+    # Match "Withdrawn", "Withdrawn-Student", "Withdrawn-Agency", etc.
+    is_withdrawn    = status_lower.str.startswith("withdrawn", na=False)
 
-    n_no_placement = int(is_no_placement.sum())
-    n_confirmed    = int(is_confirmed.sum())
-    n_withdrawn    = int(is_withdrawn.sum())
-    n_other        = len(df) - n_confirmed - n_withdrawn - n_no_placement
+    # EDU students = those whose WINNING row is EDU (they have no Confirmed/
+    # Withdrawn/other row that would have taken priority)
+    n_edu          = int(is_edu.sum())
+    n_no_placement = int((is_no_placement & ~is_edu).sum())
+    n_confirmed    = int((is_confirmed & ~is_edu).sum())
+    n_withdrawn    = int((is_withdrawn & ~is_edu).sum())
+    n_other        = len(df) - n_confirmed - n_withdrawn - n_no_placement - n_edu
 
     return {
         "confirmed":     n_confirmed,
         "withdrawn":     n_withdrawn,
         "no_placement":  n_no_placement,
         "other":         int(n_other),
+        "edu":           n_edu,
     }
 
 
@@ -199,6 +254,12 @@ def get_no_placement_students(inplace_df: pd.DataFrame, year: int) -> pd.DataFra
     ) | df["Start Date"].isna()
 
     df = df[group_year_ok & start_year_ok]
+
+    # Dedupe FIRST so each student is represented by their winning row.
+    # A student whose winning row is Confirmed/Withdrawn/EDU will NOT be
+    # treated as no-placement; only those whose winning row is blank+blank.
+    df = _dedupe_by_student(df)
+
     df = df[~df["Agency"].str.startswith("EDU -", na=False)]
 
     agency_blank = _is_blank_text(df["Agency"])
@@ -255,7 +316,15 @@ def filter_inplace(inplace_df: pd.DataFrame, year: int):
     end_col = pd.to_datetime(placed["End Date"], errors="coerce") if len(placed) > 0 else pd.Series([], dtype="datetime64[ns]")
     window_end = end_col.max().date() if len(placed) > 0 and pd.notna(end_col.max()) else None
 
-    # Exclude EDU - agencies
+    # Deduplicate FIRST, across ALL rows (including EDU rows), so that a
+    # student with e.g. an 'EDU - Credit' row AND a Confirmed row keeps the
+    # Confirmed row. Confirmed beats everything; Withdrawn beats EDU; an
+    # EDU-only student keeps their EDU row (and is then excluded below).
+    df = _dedupe_by_student(df)
+
+    # Now exclude EDU - agencies (students who don't need a placement —
+    # this only removes students whose WINNING row is EDU, i.e. they have
+    # no Confirmed/Withdrawn/other row)
     df = df[~df["Agency"].str.startswith("EDU -", na=False)]
 
     # Keep only Confirmed status (Withdrawn, Offer, blank, etc. are excluded)
@@ -280,31 +349,50 @@ def clean_school_name(name) -> str:
 def load_form(source) -> pd.DataFrame:
     """
     Load the Google Form CSV/Excel export.
-    Uses column positions 0-7 (same structure every year).
+
+    Matches columns by NAME (robust to reordering) rather than by position.
+    The current form has these columns:
+      Timestamp, Email address, Full Name,
+      School Name - as written on InPlace:,
+      What days will you be attending placement?,
+      I confirm that I have double checked my days...
+
+    Only Timestamp, Email, Full Name, and the days column are used.
     """
     df = read_file(source)
 
-    # Rename by position — robust to minor column name changes
-    col_map = {
-        df.columns[0]: "timestamp",
-        df.columns[1]: "email",
-        df.columns[2]: "full_name",
-        df.columns[3]: "pref_name",
-        df.columns[4]: "student_id",
-        df.columns[5]: "school_form",   # ignored — we use InPlace Agency
-        df.columns[6]: "days_raw",
-    }
-    df = df.rename(columns=col_map)
+    def find_col(*keywords):
+        """Find the first column whose lowercased name contains all keywords."""
+        for col in df.columns:
+            name = str(col).lower()
+            if all(k in name for k in keywords):
+                return col
+        return None
 
-    df["email"]      = df["email"].astype(str).str.strip().str.lower()
-    df["pref_name"]  = df["pref_name"].astype(str).str.strip()
-    df["pref_name"]  = df["pref_name"].where(
-        ~df["pref_name"].isin(["", "nan", "NaN"]), other=""
-    )
-    df["days_raw"]   = df["days_raw"].astype(str).str.strip()
-    df["days_raw"]   = df["days_raw"].where(df["days_raw"] != "nan", other="")
+    ts_col    = find_col("timestamp")
+    email_col = find_col("email")
+    name_col  = find_col("full name") or find_col("name")
+    days_col  = find_col("days") or find_col("attending")
 
-    return df
+    missing = []
+    if ts_col is None:    missing.append("Timestamp")
+    if email_col is None: missing.append("Email address")
+    if name_col is None:  missing.append("Full Name")
+    if days_col is None:  missing.append("What days will you be attending placement?")
+    if missing:
+        raise ValueError(
+            f"The Google Form file is missing these column(s): {', '.join(missing)}.\n"
+            f"Columns found in your file: {list(df.columns)}"
+        )
+
+    out = pd.DataFrame()
+    out["timestamp"] = df[ts_col]
+    out["email"]     = df[email_col].astype(str).str.strip().str.lower()
+    out["full_name"] = df[name_col].astype(str).str.strip()
+    out["days_raw"]  = df[days_col].astype(str).str.strip()
+    out["days_raw"]  = out["days_raw"].where(out["days_raw"] != "nan", other="")
+
+    return out
 
 
 # ── Date detection ───────────────────────────────────────────
@@ -410,7 +498,7 @@ def build_schedule_labels(ordered_dates: list):
 
 def _build_form_lookup(form_df: pd.DataFrame, day_lookup: dict) -> dict:
     """
-    Build a lookup: email -> {pref_name, days set, submitted, student_id}
+    Build a lookup: email -> {days set, submitted}
 
     Since form_df is already filtered by timestamp year in
     detect_placement_dates, only the current year's submissions are
@@ -431,10 +519,8 @@ def _build_form_lookup(form_df: pd.DataFrame, day_lookup: dict) -> dict:
             existing = form_lookup.get(email, {})
             if len(days) >= len(existing.get("days", set())):
                 form_lookup[email] = {
-                    "pref_name":  row["pref_name"],
-                    "days":       days,
-                    "submitted":  True,
-                    "student_id": row["student_id"],
+                    "days":      days,
+                    "submitted": True,
                 }
     return form_lookup
 
@@ -454,12 +540,10 @@ def build_master(inplace_df: pd.DataFrame,
     master_rows = []
     for _, ip_row in inplace_df.iterrows():
         email      = ip_row["Email"].lower().strip()
-        form_data  = form_lookup.get(email, {"pref_name": "", "days": set(), "submitted": False, "student_id": ""})
+        form_data  = form_lookup.get(email, {"days": set(), "submitted": False})
         master_rows.append({
             "student_name": ip_row["Student"],
-            "pref_name":    form_data["pref_name"],   # from form only
             "email":        email,
-            "student_id":   form_data.get("student_id", ""),  # from form only
             "agency":       clean_school_name(ip_row["Agency"]),
             "submitted":    form_data["submitted"],
             "days":         form_data["days"],
@@ -475,20 +559,18 @@ def build_no_placement_df(no_placement_inplace: pd.DataFrame,
     Build the "No Placement" student list directly from InPlace rows
     (blank Status AND blank Agency, excluding 'EDU -' — see
     get_no_placement_students). Each student is enriched with their Form
-    submission (preferred name + selected days) if they happen to have
-    submitted the form already, even though they have no placement yet.
+    submission (selected days) if they happen to have submitted the form
+    already, even though they have no placement yet.
     """
     form_lookup = _build_form_lookup(form_df, day_lookup)
 
     rows = []
     for _, ip_row in no_placement_inplace.iterrows():
         email     = ip_row["Email"].lower().strip()
-        form_data = form_lookup.get(email, {"pref_name": "", "days": set(), "submitted": False, "student_id": ""})
+        form_data = form_lookup.get(email, {"days": set(), "submitted": False})
         rows.append({
             "student_name": ip_row["Student"],
-            "pref_name":    form_data["pref_name"],
             "email":        email,
-            "student_id":   form_data.get("student_id", ""),
             "submitted":    form_data["submitted"],
             "days":         form_data["days"],
         })
@@ -515,10 +597,8 @@ def build_matrix_from_master(school: str,
 
     for _, s in submitted.iterrows():
         row = {
-            "display_name": s["pref_name"] if s["pref_name"] else s["student_name"],
             "full_name":    s["student_name"],
             "email":        s["email"],
-            "student_id":   s["student_id"],
             "note":         "",
         }
         for d in ordered_dates:
@@ -527,10 +607,8 @@ def build_matrix_from_master(school: str,
 
     for _, s in not_submitted.iterrows():
         row = {
-            "display_name": s["student_name"],
             "full_name":    s["student_name"],
             "email":        s["email"],
-            "student_id":   s["student_id"],
             "note":         "No preference submitted",
         }
         for d in ordered_dates:
@@ -584,10 +662,9 @@ def build_workbook(school, mat, ordered_dates, short_labels,
                    week_of, week_labels, range_label) -> Workbook:
 
     n_students    = len(mat)
-    # Columns: Preferred Name | Full Name | Email | Student ID | Note | [days]
-    fixed_headers = ["Preferred Name", "Full Name", "Email Address",
-                     "Student ID", "Note"]
-    n_fixed       = len(fixed_headers)   # 5
+    # Columns: Full Name | Email | Note | [days]
+    fixed_headers = ["Full Name", "Email Address", "Note"]
+    n_fixed       = len(fixed_headers)   # 3
     n_days        = 15
     total_cols    = n_fixed + n_days
 
@@ -643,13 +720,12 @@ def build_workbook(school, mat, ordered_dates, short_labels,
         text_colour = NO_SUB_FG if no_sub else "000000"
 
         for ci, val in enumerate(
-            [row["display_name"], row["full_name"],
-             row["email"], row["student_id"], row["note"]], 1
+            [row["full_name"], row["email"], row["note"]], 1
         ):
             c = ws.cell(rn, ci, val)
             style_cell(c, bg=row_bg, fg=text_colour,
-                        h_align="left" if ci <= 4 else "center",
-                        italic=no_sub and ci == 5)
+                        h_align="left" if ci <= 2 else "center",
+                        italic=no_sub and ci == 3)
 
         for di, d in enumerate(ordered_dates):
             ci  = n_fixed + di + 1
@@ -675,11 +751,9 @@ def build_workbook(school, mat, ordered_dates, short_labels,
     ws.row_dimensions[tr].height = 22
 
     # Column widths and freeze
-    ws.column_dimensions["A"].width = 22   # preferred name
-    ws.column_dimensions["B"].width = 22   # full name
-    ws.column_dimensions["C"].width = 30   # email
-    ws.column_dimensions["D"].width = 13   # student id
-    ws.column_dimensions["E"].width = 26   # note
+    ws.column_dimensions["A"].width = 26   # full name
+    ws.column_dimensions["B"].width = 32   # email
+    ws.column_dimensions["C"].width = 26   # note
     for di in range(n_days):
         ws.column_dimensions[get_column_letter(n_fixed + di + 1)].width = 10
     ws.freeze_panes = ws.cell(data_start, n_fixed + 1)
@@ -750,7 +824,7 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
     name and selected days are shown too.
     """
 
-    n_fixed    = 5   # Name | Email | Student ID | Preferred Name | Submitted Form?
+    n_fixed    = 3   # Full Name | Email | Submitted Form?
     n_days     = 15
     total_cols = n_fixed + n_days
 
@@ -787,8 +861,7 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
     ws.row_dimensions[3].height = 22
 
     # Column headers
-    headers = ["Full Name", "Email Address", "Student ID",
-               "Preferred Name", "Submitted Form?"] + short_labels
+    headers = ["Full Name", "Email Address", "Submitted Form?"] + short_labels
     for ci, h in enumerate(headers, 1):
         c = ws.cell(4, ci, h)
         style_cell(c, bg=DARK_NAVY, fg="FFFFFF", bold=True,
@@ -803,12 +876,11 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
 
         fixed_vals = [
             row.get("student_name", ""), row.get("email", ""),
-            row.get("student_id", ""), row.get("pref_name", ""),
             "Yes" if submitted else "No",
         ]
         for ci, val in enumerate(fixed_vals, 1):
             c = ws.cell(rn, ci, val)
-            if ci == 5:
+            if ci == 3:
                 style_cell(c, bg=row_bg,
                            fg="1B5E20" if submitted else "999999",
                            bold=submitted, h_align="center")
@@ -825,11 +897,9 @@ def build_no_placement_workbook(no_placement_df: pd.DataFrame,
                 style_cell(c, bg=WK_BG[week_of[di] - 1])
         ws.row_dimensions[rn].height = 18
 
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 13
-    ws.column_dimensions["D"].width = 22
-    ws.column_dimensions["E"].width = 16
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 16
     for di in range(n_days):
         ws.column_dimensions[get_column_letter(n_fixed + di + 1)].width = 10
     ws.freeze_panes = ws.cell(data_start, n_fixed + 1)
